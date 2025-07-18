@@ -1,0 +1,142 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.ProBuilder;
+using UnityEngine.ProBuilder.MeshOperations;
+using Sirenix.OdinInspector;
+
+public class UVExporter : MonoBehaviour
+{
+    [FolderPath(ParentFolder = "Assets", RequireExistingPath = true)] public string folderPath;
+
+    public Camera targetCamera;
+    public ProBuilderMesh mesh;
+    public int pixelsPerUnit = 128;
+
+    public Color meshColor = Color.green;
+    public Color boundsColor = Color.blue;
+
+    [Button] private void ExportUVs() { ExportUVs(mesh); }
+    [Button] private void SetPivot() { SetPivotInCenterOfBase(mesh); }
+
+    private void SetPivotInCenterOfBase(ProBuilderMesh mesh)
+    {
+        var bounds = mesh.transform.GetComponent<MeshRenderer>().bounds;
+        mesh.SetPivot(new Vector3(bounds.center.x, bounds.min.y, bounds.center.z));
+    }
+
+    private void ExportUVs(ProBuilderMesh mesh)
+    {
+        var bounds = mesh.transform.GetComponent<MeshRenderer>().bounds;
+        var localBounds = mesh.transform.GetComponent<MeshRenderer>().localBounds;
+        var units_left = localBounds.size.z;
+        var units_right = localBounds.size.x;
+        var units_up = 0.5f * units_left + 0.5f * units_right + 1.25f * localBounds.size.y;
+
+        mesh.SetPivot(bounds.min);
+        var vertices = mesh.GetVertices();
+        var uvs = new List<Vector4>();
+
+        var minX = targetCamera.WorldToViewportPoint(new Vector3(0, 0, localBounds.size.z)).x;
+        var minY = targetCamera.WorldToViewportPoint(new Vector3(0, 0, 0)).y;
+        var maxX = targetCamera.WorldToViewportPoint(new Vector3(localBounds.size.x, 0, 0)).x;
+        var maxY = targetCamera.WorldToViewportPoint(localBounds.max).y;
+
+        foreach (var face in mesh.faces)
+        {
+            face.manualUV = true;
+        }
+        for (int i = 0; i < vertices.Length; i++)
+        {
+            var v3 = targetCamera.WorldToViewportPoint(vertices[i].position);
+            uvs.Add(new(v3.x, v3.y, 0, 0));
+        }
+
+        NormalizeUVs(uvs, minX, maxX, minY, maxY);
+
+        mesh.SetVertices(vertices);
+        mesh.SetUVs(0, uvs);
+        mesh.RefreshUV(mesh.faces);
+
+        var boxBounds = new List<Vector4>()
+        {
+            targetCamera.WorldToViewportPoint(new Vector3(0, 0, 0)),
+            targetCamera.WorldToViewportPoint(new Vector3(0, 0, localBounds.size.z)),
+            targetCamera.WorldToViewportPoint(new Vector3(0, localBounds.size.y, localBounds.size.z)),
+            targetCamera.WorldToViewportPoint(localBounds.max),
+            targetCamera.WorldToViewportPoint(new Vector3(localBounds.size.x, localBounds.size.y, 0)),
+            targetCamera.WorldToViewportPoint(new Vector3(localBounds.size.x, 0, 0)),
+            targetCamera.WorldToViewportPoint(new Vector3(0, 0, 0))
+        };
+
+        NormalizeUVs(boxBounds, minX, maxX, minY, maxY);
+
+        ExportMeshUVLayout(mesh.faces, uvs, boxBounds,
+            Mathf.RoundToInt(pixelsPerUnit * (units_left + units_right)),
+            Mathf.RoundToInt(pixelsPerUnit * units_up));
+    }
+
+    private void NormalizeUVs(List<Vector4> uvs, float minX, float maxX, float minY, float maxY)
+    {
+        for (int i = 0; i < uvs.Count; i++)
+        {
+            uvs[i] = new((uvs[i].x - minX) / (maxX - minX), (uvs[i].y - minY) / (maxY - minY), 0, 0);
+        }
+    }
+
+    private void AdjustUVs(List<Vector4> uvs, int width, int height)
+    {
+        for (int i = 0; i < uvs.Count; i++)
+        {
+            uvs[i] = new Vector2(Mathf.FloorToInt(uvs[i].x * width), Mathf.FloorToInt(uvs[i].y * height));
+        }
+    }
+
+    public void ExportMeshUVLayout(IList<Face> faces, List<Vector4> uvs, List<Vector4> bounds, int width, int height)
+    {
+        AdjustUVs(uvs, width, height);
+        AdjustUVs(bounds, width, height);
+
+        Texture2D uvLayoutTexture = new(width, height);
+        uvLayoutTexture.wrapMode = TextureWrapMode.Clamp;
+        Color32[] colors = new Color32[uvLayoutTexture.width * uvLayoutTexture.height];
+        for (int i = 0; i < colors.Length; i++)
+        {
+            colors[i] = Color.clear;
+        }
+        uvLayoutTexture.SetPixels32(colors);
+
+        for (int i = 0; i < bounds.Count - 1; i++)
+        {
+            DrawLine(uvLayoutTexture, bounds[i], bounds[i + 1], boundsColor);
+        }
+
+        foreach (var face in faces)
+        {
+            foreach (var edge in face.edges)
+            {
+                DrawLine(uvLayoutTexture, uvs[edge.a], uvs[edge.b], meshColor);
+            }
+        }
+        uvLayoutTexture.Apply(); // Apply the changes to the texture
+#if UNITY_EDITOR
+        byte[] pngData = uvLayoutTexture.EncodeToPNG(); // Save the texture as a PNG file
+        System.IO.File.WriteAllBytes(Application.dataPath + "/" + folderPath + "/" + mesh.gameObject.name + ".png", pngData);
+        UnityEditor.AssetDatabase.Refresh();
+#endif
+    }
+
+    public void DrawLine(Texture2D tex, Vector2 p1, Vector2 p2, Color col)
+    {
+        Vector2 t = p1;
+        float frac = 1 / Mathf.Sqrt(Mathf.Pow(p2.x - p1.x, 2) + Mathf.Pow(p2.y - p1.y, 2));
+        float ctr = 0;
+
+        while ((int)t.x != (int)p2.x || (int)t.y != (int)p2.y)
+        {
+            t = Vector2.Lerp(p1, p2, ctr);
+            ctr += frac;
+            tex.SetPixel((int)t.x, (int)t.y, col);
+        }
+    }
+}
